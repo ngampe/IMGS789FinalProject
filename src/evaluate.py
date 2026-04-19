@@ -65,6 +65,41 @@ def save_score_plot(
     plt.savefig(out_path, dpi=200)
     plt.close()
 
+def evaluate_multiple_percentiles(train_errors, test_errors, test_labels, percentiles):
+    rows = []
+    for q in percentiles:
+        thr = percentile_threshold(train_errors, q=q)
+        pred = (test_errors > thr).astype(np.int64)
+        p, r, f1, cm = evaluate_predictions(test_labels, pred)
+        rows.append((q, thr, p, r, f1, cm))
+    return rows
+
+def rolling_threshold(scores: np.ndarray, window: int = 50, k: float = 2.0) -> np.ndarray:
+    thresholds = np.zeros_like(scores)
+    for i in range(len(scores)):
+        start = max(0, i - window + 1)
+        window_scores = scores[start:i+1]
+        thresholds[i] = window_scores.mean() + k * window_scores.std()
+    return thresholds
+
+def save_dynamic_score_plot(scores, y_true, thresholds, out_path, title):
+    Path("figures").mkdir(exist_ok=True)
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(scores, label="Anomaly score")
+    plt.plot(thresholds, color="red", linestyle="--", label="Rolling threshold")
+
+    anomaly_idx = np.where(y_true == 1)[0]
+    plt.scatter(anomaly_idx, scores[anomaly_idx], color="orange", s=8, label="True anomalies")
+
+    plt.xlabel("Test sample index")
+    plt.ylabel("Reconstruction error")
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close()
+
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -89,6 +124,31 @@ if __name__ == "__main__":
     thr_pct = percentile_threshold(train_errors, q=95.0)
     pred_pct = (test_errors > thr_pct).astype(np.int64)
     p_pct, r_pct, f1_pct, cm_pct = evaluate_predictions(test_labels, pred_pct)
+
+    percentile_rows = evaluate_multiple_percentiles(
+    train_errors, test_errors, test_labels, [90.0, 95.0, 97.0, 99.0])
+
+    print("\n=== Percentile Sweep ===")
+    for q, thr, p, r, f1, cm in percentile_rows:
+        print(f"{q:.0f}th percentile | thr={thr:.4f} | P={p:.4f} | R={r:.4f} | F1={f1:.4f}")
+    
+    rolling_thr = rolling_threshold(test_errors, window=50, k=2.0)
+    pred_roll = (test_errors > rolling_thr).astype(np.int64)
+    p_roll, r_roll, f1_roll, cm_roll = evaluate_predictions(test_labels, pred_roll)
+
+    save_dynamic_score_plot(
+        test_errors,
+        test_labels,
+        rolling_thr,
+        "figures/test_scores_rolling_threshold.png",
+        "ECG5000 Anomaly Scores with Rolling Threshold",
+    )
+
+    print("\n=== Rolling Threshold ===")
+    print(f"Precision: {p_roll:.4f}")
+    print(f"Recall:    {r_roll:.4f}")
+    print(f"F1-score:  {f1_roll:.4f}")
+    print("Confusion matrix:\n", cm_roll)    
 
     print("\n=== Fixed Threshold (mean + 3*std) ===")
     print("Threshold:", thr_fixed)
@@ -130,3 +190,15 @@ if __name__ == "__main__":
     print("- results/test_errors.npy")
     print("- figures/test_scores_fixed_threshold.png")
     print("- figures/test_scores_percentile_threshold.png")
+
+    import csv
+
+    with open("results/metrics_summary.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Method", "Threshold", "Precision", "Recall", "F1"])
+        writer.writerow(["Fixed", thr_fixed, p_fix, r_fix, f1_fix])
+        writer.writerow(["Percentile95", thr_pct, p_pct, r_pct, f1_pct])
+        writer.writerow(["Rolling", "dynamic", p_roll, r_roll, f1_roll])
+
+        for q, thr, p, r, f1, _ in percentile_rows:
+            writer.writerow([f"Percentile{int(q)}", thr, p, r, f1])
